@@ -1,0 +1,256 @@
+要给肯德基点餐系统添加数据库（以最常用的 **MySQL** 为例），核心是实现「菜品数据从数据库读取」「购物车/订单数据存入数据库」，以下是详细的步骤和代码改造方案，新手也能跟着做：
+
+### 一、前期准备
+1. **安装环境**
+   - 安装 MySQL 数据库（记住用户名/密码，比如默认 `root` + 自己设的密码）；
+   - 给 Java 项目添加 MySQL 驱动（最常用的是 `mysql-connector-java`）：
+     - 若用普通控制台项目：下载 `mysql-connector-java-8.0.30.jar`（适配MySQL8+），将jar包放到项目目录，编译运行时指定类路径（命令：`javac -cp mysql-connector-java-8.0.30.jar;. KFCOrderingApp.java`，运行：`java -cp mysql-connector-java-8.0.30.jar;. KFCOrderingApp`）；
+     - 若用IDEA/Eclipse：直接添加该依赖（Maven项目可加pom依赖，非Maven手动导入jar）。
+
+2. **创建数据库和表**
+   打开 MySQL 客户端（Navicat/CMD/MySQL Workbench），执行以下SQL语句，创建点餐系统所需的表：
+   ```sql
+   -- 创建数据库
+   CREATE DATABASE IF NOT EXISTS kfc_ordering;
+   USE kfc_ordering;
+
+   -- 菜品表（存储菜单数据）
+   CREATE TABLE IF NOT EXISTS menu (
+       id INT PRIMARY KEY AUTO_INCREMENT,  -- 菜品编号
+       name VARCHAR(50) NOT NULL,         -- 菜品名称
+       price DECIMAL(10,2) NOT NULL       -- 菜品价格
+   );
+
+   -- 订单表（存储结算后的订单）
+   CREATE TABLE IF NOT EXISTS orders (
+       order_id INT PRIMARY KEY AUTO_INCREMENT,  -- 订单编号
+       total_price DECIMAL(10,2) NOT NULL,      -- 订单总价
+       create_time DATETIME DEFAULT CURRENT_TIMESTAMP  -- 下单时间
+   );
+
+   -- 订单项表（存储每个订单的菜品明细）
+   CREATE TABLE IF NOT EXISTS order_items (
+       item_id INT PRIMARY KEY AUTO_INCREMENT,
+       order_id INT NOT NULL,          -- 关联订单编号
+       dish_name VARCHAR(50) NOT NULL, -- 菜品名称
+       quantity INT NOT NULL,          -- 菜品数量
+       price DECIMAL(10,2) NOT NULL,   -- 菜品单价
+       FOREIGN KEY (order_id) REFERENCES orders(order_id)
+   );
+
+   -- 初始化菜品数据（可自行修改/添加）
+   INSERT INTO menu (name, price) VALUES 
+   ('香辣鸡腿堡', 18.5),
+   ('原味鸡', 12.0),
+   ('可乐', 5.0),
+   ('薯条', 8.5),
+   ('蛋挞', 4.0);
+   ```
+
+### 二、Java代码改造（核心步骤）
+新增一个「数据库工具类」负责连接MySQL，然后改造原有系统，把“硬编码的菜单”换成“从数据库读取”，把“结算逻辑”换成“存入数据库”。
+
+#### 步骤1：编写数据库连接工具类（DBUtil.java）
+```java
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+
+// 数据库连接工具类，统一管理数据库连接
+public class DBUtil {
+    // 数据库配置（替换成你的MySQL地址、用户名、密码）
+    private static final String URL = "jdbc:mysql://localhost:3306/kfc_ordering?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true";
+    private static final String USER = "root";  // 你的MySQL用户名
+    private static final String PASSWORD = "123456"; // 你的MySQL密码
+
+    // 获取数据库连接
+    public static Connection getConnection() {
+        Connection conn = null;
+        try {
+            // 加载MySQL驱动
+            Class.forName("com.mysql.cj.jdbc.Driver");
+            conn = DriverManager.getConnection(URL, USER, PASSWORD);
+        } catch (ClassNotFoundException e) {
+            System.out.println("驱动加载失败！");
+            e.printStackTrace();
+        } catch (SQLException e) {
+            System.out.println("数据库连接失败！");
+            e.printStackTrace();
+        }
+        return conn;
+    }
+
+    // 关闭数据库连接（用完必须关，避免资源泄露）
+    public static void closeConnection(Connection conn) {
+        if (conn != null) {
+            try {
+                conn.close();
+            } catch (SQLException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
+```
+
+#### 步骤2：改造菜单加载逻辑（从数据库读取菜品）
+修改原有 `KFCOrderingSystem` 类的「菜单初始化」方法，把硬编码的菜品换成从MySQL读取：
+```java
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
+
+public class KFCOrderingSystem {
+    private List<MenuItem> menuList; // 菜品列表
+    private List<CartItem> cartList; // 购物车列表
+
+    // 初始化：从数据库加载菜单
+    public KFCOrderingSystem() {
+        menuList = new ArrayList<>();
+        cartList = new ArrayList<>();
+        loadMenuFromDB(); // 加载数据库中的菜品
+    }
+
+    // 从数据库读取菜单数据
+    private void loadMenuFromDB() {
+        Connection conn = DBUtil.getConnection();
+        String sql = "SELECT id, name, price FROM menu"; // 查询菜品表
+        try (PreparedStatement pstmt = conn.prepareStatement(sql);
+             ResultSet rs = pstmt.executeQuery()) {
+
+            while (rs.next()) {
+                // 把数据库中的每一行菜品数据，封装成MenuItem对象
+                int id = rs.getInt("id");
+                String name = rs.getString("name");
+                double price = rs.getDouble("price");
+                menuList.add(new MenuItem(id, name, price)); // 注意：MenuItem要加id属性
+            }
+            System.out.println("菜单已从数据库加载完成！");
+        } catch (SQLException e) {
+            e.printStackTrace();
+        } finally {
+            DBUtil.closeConnection(conn); // 关闭连接
+        }
+    }
+
+    // 其他原有方法（查看菜单、添加购物车等）不变，仅需适配MenuItem的id属性
+    // ...（保留你原来的showMenu、addToCart等方法）
+}
+```
+
+#### 步骤3：改造结算逻辑（订单存入数据库）
+在 `KFCOrderingSystem` 类中新增「保存订单到数据库」的方法，结算时调用：
+```java
+// 结算并保存订单到数据库
+public void checkout() {
+    if (cartList.isEmpty()) {
+        System.out.println("购物车为空，无法结算！");
+        return;
+    }
+
+    // 1. 计算订单总价
+    double totalPrice = 0;
+    for (CartItem item : cartList) {
+        totalPrice += item.getTotalPrice();
+    }
+
+    // 2. 把订单存入数据库
+    Connection conn = DBUtil.getConnection();
+    try {
+        conn.setAutoCommit(false); // 开启事务（保证订单和订单项同时保存）
+
+        // 第一步：插入订单主表（orders）
+        String orderSql = "INSERT INTO orders (total_price) VALUES (?)";
+        PreparedStatement orderPstmt = conn.prepareStatement(orderSql, PreparedStatement.RETURN_GENERATED_KEYS);
+        orderPstmt.setDouble(1, totalPrice);
+        orderPstmt.executeUpdate();
+
+        // 获取自动生成的订单编号
+        ResultSet rs = orderPstmt.getGeneratedKeys();
+        int orderId = 0;
+        if (rs.next()) {
+            orderId = rs.getInt(1);
+        }
+
+        // 第二步：插入订单项表（order_items）
+        String itemSql = "INSERT INTO order_items (order_id, dish_name, quantity, price) VALUES (?, ?, ?, ?)";
+        PreparedStatement itemPstmt = conn.prepareStatement(itemSql);
+        for (CartItem cartItem : cartList) {
+            itemPstmt.setInt(1, orderId);
+            itemPstmt.setString(2, cartItem.getMenuItem().getName());
+            itemPstmt.setInt(3, cartItem.getQuantity());
+            itemPstmt.setDouble(4, cartItem.getMenuItem().getPrice());
+            itemPstmt.addBatch(); // 批量插入订单项
+        }
+        itemPstmt.executeBatch();
+
+        conn.commit(); // 提交事务
+        System.out.println("结算成功！订单编号：" + orderId + "，总价：" + totalPrice + "元");
+        cartList.clear(); // 清空购物车
+
+    } catch (SQLException e) {
+        try {
+            conn.rollback(); // 出错回滚事务
+        } catch (SQLException ex) {
+            ex.printStackTrace();
+        }
+        e.printStackTrace();
+        System.out.println("结算失败，订单未保存！");
+    } finally {
+        DBUtil.closeConnection(conn);
+    }
+}
+```
+
+#### 步骤4：适配MenuItem类（新增id属性）
+原有 `MenuItem` 类需要添加菜品编号（对应数据库的id）：
+```java
+public class MenuItem {
+    private int id;         // 菜品编号（新增）
+    private String name;    // 菜品名称
+    private double price;   // 菜品价格
+
+    // 构造方法（新增id参数）
+    public MenuItem(int id, String name, double price) {
+        this.id = id;
+        this.name = name;
+        this.price = price;
+    }
+
+    // getter/setter方法（新增getId()）
+    public int getId() {
+        return id;
+    }
+    public String getName() {
+        return name;
+    }
+    public double getPrice() {
+        return price;
+    }
+}
+```
+
+### 三、关键说明（新手必看）
+1. **核心逻辑**：
+   - 菜单数据不再写死在代码里，而是存在MySQL的`menu`表中，想修改菜品/价格直接改数据库，不用改代码；
+   - 每次结算生成的订单，会存入`orders`和`order_items`表，可在数据库中查看历史订单。
+2. **常见问题解决**：
+   - 驱动报错：确认MySQL版本和驱动版本匹配（MySQL8+用`com.mysql.cj.jdbc.Driver`，MySQL5.x用`com.mysql.jdbc.Driver`）；
+   - 连接失败：检查URL中的`localhost:3306`（MySQL端口是否正确）、用户名/密码是否正确；
+   - 中文乱码：URL后加`&characterEncoding=utf8`，数据库表也设置`utf8mb4`编码。
+3. **进阶扩展（可选）**：
+   - 可添加「用户表」，给每个订单关联用户；
+   - 可添加「库存字段」，点餐时判断菜品是否售罄；
+   - 可实现「查询历史订单」功能，从数据库读取订单数据展示。
+
+### 四、运行测试
+1. 先启动MySQL，确保`kfc_ordering`数据库和表已创建；
+2. 编译并运行改造后的Java程序：
+   - 查看菜单：能看到数据库中插入的香辣鸡腿堡、原味鸡等菜品；
+   - 添加购物车：选择菜品编号，正常加入；
+   - 结算：控制台显示订单编号，去MySQL中查询`orders`和`order_items`表，能看到新增的订单数据，说明数据库集成成功。
+
+按照这个步骤改完，你的肯德基点餐系统就从“纯内存运行”变成了“带数据库持久化”的版本，数据不会因为程序关闭丢失，也更贴近真实项目的逻辑。
